@@ -27,7 +27,7 @@ Requires pi 1.2.0 or newer to use all models (but should mostly work >=0.86.1).
 
 Use `/model` to select any Claude model in pi-ai's catalog, e.g. `claude-bridge/claude-fable-5-1`, `claude-bridge/claude-opus-5`, or `claude-bridge/claude-haiku-4-5`.
 
-Behind the scenes, pi's tools are bridged to Claude Code but everything works like normal in pi. Bash commands get Claude Code's 120-second default timeout since pi's bash has none. Skills are forwarded to Claude Code's system prompt, and steering mid-turn reaches Claude at the next tool boundary.
+Behind the scenes, pi's tools are bridged to Claude Code but everything works like normal in pi. Bash commands get Claude Code's 120-second default timeout since pi's bash has none. pi's system prompt is sent to Claude Code as-is, replacing Claude Code's own, and steering mid-turn reaches Claude at the next tool boundary.
 
 The model list comes from pi-ai's Anthropic catalog automatically — when pi-ai adds a new Claude model, it appears in `/model` after updating the package, no bridge update needed. Dated snapshot ids (e.g. `claude-opus-4-5-20251101`) are not shown.
 
@@ -100,20 +100,20 @@ When filing a bug about a session-resume failure (e.g. "No conversation found"),
 
 ### Which injection routes reach Claude Code
 
-The bridge forwards pi's structured parts — project context files, skills, custom prompt, appended instructions, and custom prompt sections (`systemPromptOptions.sections`) — and drops the rest. Measured against the request body (`diag/capture-proxy.mjs`):
+The bridge sends pi's final system prompt to Claude Code verbatim, in place of Claude Code's preset. Whatever pi would send to any other provider is what Claude Code gets, so every route that changes pi's prompt reaches the model:
 
 | Route | Reaches Claude Code |
 |---|---|
 | `before_agent_start` -> `message` | Yes, as literal prompt text in the user turn |
 | `context` editing the last user message | Yes, as literal prompt text |
-| `--append-system-prompt` | Yes, with pi's appended instructions |
-| `context_with_system` editing the system message | Yes when it wraps pi's prompt; the turn fails when it replaces one |
-| `before_agent_start` -> `systemPromptOptions.sections` | Yes, one `<name>` block per section |
-| `before_agent_start` -> `systemPrompt` | No, dropped |
+| `--system-prompt` / `--append-system-prompt` | Yes, as part of pi's system prompt |
+| `context_with_system` editing the system message | Yes |
+| `before_agent_start` -> `systemPromptOptions.sections` | Yes, as pi renders them |
+| `before_agent_start` -> `systemPrompt` | Yes, verbatim |
 
-Two traps. Returning `systemPrompt` from `before_agent_start` makes pi replace the whole system prompt, discarding any `context_with_system` edit in the same run — only one reaches the request. And system-prompt edits work by *wrapping*: replacing pi's prompt leaves the bridge with nothing to match, so it refuses the turn rather than send Claude Code a request missing your context files, skills and custom instructions. The error names the closest known prompt and where it diverged.
+One trap: returning `systemPrompt` from `before_agent_start` makes pi replace the whole system prompt, discarding any `context_with_system` edit in the same run — only one reaches the request.
 
-To add instructions, use `message`, `context`, or a system-message edit that keeps pi's prompt intact.
+Claude Code's own tool and permission guidance is not sent. Tool descriptions still reach the model through MCP; any other guidance has to come from pi's prompt.
 
 ### Hooks written for Claude Code
 
@@ -129,9 +129,9 @@ Hooks do not fire on isolated summary queries.
 
 pi runs compaction and branch summaries natively. The bridge routes their `cacheRetention: "none"` calls to isolated Claude Code queries, leaving the live session untouched until pi completes the history rewrite. Other extensions can provide summaries through pi's hooks.
 
-### System prompt rejections
+### Extra Usage billing
 
-Other extensions can change the system prompt. When the result still contains pi's built-in system prompt text, or the two documentation paths that Anthropic looks for (`docs/custom-provider.md` in the same prompt with `docs/packages.md`), the bridge stops the turn instead of sending it, since Anthropic may otherwise bill these requests as Extra Usage. Fix the source extension before retrying; `CLAUDE_BRIDGE_DEBUG=1` writes the full prompt to the bridge log when this happens.
+The bridge does not check the system prompt before sending it. Anthropic may bill a request as Extra Usage, or reject it with a 400, when the prompt carries pi's built-in preamble ("You are an expert coding assistant operating inside pi") or both of pi's documentation paths (`docs/custom-provider.md` together with `docs/packages.md`). Pi's default prompt contains both, so use an extension that builds a prompt without them. `CLAUDE_BRIDGE_DEBUG=1` logs each query's system prompt length to the bridge log.
 
 ### Plan usage for footers and quota extensions
 
@@ -151,6 +151,6 @@ Requires the following in `~/.pi/agent/subagents.json`:
 
 **Files Claude Code edits are not carried across a rebuild.** The edit itself survives in the history as a tool call and result — what's lost is the post-edit file snapshot. `@file` expansions *are* carried.
 
-**System prompt changes mid-session may not reach the model.** The bridge keeps Claude Code's default prompt recording: project context (AGENTS.md/CLAUDE.md), skills, and extension-written instructions are captured on the first request and reused on resume. This keeps the cached prefix stable, but later changes may not take effect until a rebuild or compaction. Start a new session if updated instructions must take effect immediately.
+**System prompt changes mid-session may not reach the model.** The bridge keeps Claude Code's default prompt recording: the system prompt is captured on the first request and reused on resume. This keeps the cached prefix stable, but later changes may not take effect until a rebuild or compaction. Start a new session if updated instructions must take effect immediately.
 
 **Exported Anthropic environment variables override the Claude Code child (issue #107).** An exported `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` redirects Claude Code to that gateway and every turn fails with its auth error. Unset them for the pi process.
